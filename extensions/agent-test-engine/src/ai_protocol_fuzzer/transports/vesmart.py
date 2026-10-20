@@ -78,7 +78,7 @@ class VesmartTransport(BaseTransport):
         if state.cancel_event.is_set():
             return TransportResponse("", status_code=0, error="cancelled", completion_status="cancelled")
         events: list[dict] = []
-        metadata: dict = {"target_abort": "unsupported", "truncated": False}
+        metadata: dict = {"target_abort": "unsupported", "truncated": False, "response_channel": config.response_channel}
         assembler = None
         tasks: list[asyncio.Task] = []
 
@@ -89,6 +89,8 @@ class VesmartTransport(BaseTransport):
 
         async def exchange():
             nonlocal assembler
+            if config.session_mode not in {"server_create", "client_message_id"} or config.response_channel not in {"session_event", "prompt_sse"}:
+                raise _StreamFailure("failed", "unsupported protocol configuration")
             parsed = urlsplit(config.url)
             base = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.split("/session/prompt")[0].rstrip("/"), "", ""))
             if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.fragment:
@@ -101,10 +103,12 @@ class VesmartTransport(BaseTransport):
                 if name == "sessionID" or (name in context and context[name] != value):
                     raise _StreamFailure("failed", "conflicting endpoint query parameters")
                 context[name] = value
-            material = json.dumps([base, config.identity_ref, sorted(config.headers.items()), sorted(context.items()), config.json_template], ensure_ascii=True, sort_keys=True)
+            material = json.dumps([base, config.identity_ref, sorted(config.headers.items()), sorted(context.items()), config.json_template, config.session_mode, config.response_channel], ensure_ascii=True, sort_keys=True)
             key = "wesmart:" + hashlib.sha256(material.encode()).hexdigest()
             binding = state.variables.get(key, {})
             session_id = parsed_params.get("sessionID", [""])[0]
+            if config.session_mode == "client_message_id" and session_id not in {"", "auto"}:
+                raise _StreamFailure("failed", "client sessions cannot reuse a captured session id")
             async def initial_request(request):
                 if config.timestamp_header:
                     request.headers["t_time"] = str(time.time_ns() // 1_000_000)
@@ -115,27 +119,37 @@ class VesmartTransport(BaseTransport):
                 trust_env=False, follow_redirects=False, timeout=float(config.timeout),
                 event_hooks={"request": [initial_request]},
             ) as client:
-                async def post_bounded(path: str, body: dict, params=None):
+                async def post_bounded(path: str, body: dict, params=None, byte_limit=65536):
                     raw = bytearray()
-                    async with client.stream("POST", path, json=body, params=params) as response:
+                    async with client.stream("POST", path, json=body, params=params, headers={"Accept-Encoding": "identity"}) as response:
+                        if response.headers.get("content-encoding", "identity") not in {"identity", ""}:
+                            raise _StreamFailure("failed", "compressed control response is not supported")
                         async for chunk in response.aiter_raw():
                             raw.extend(chunk)
-                            if len(raw) > 65536:
+                            if len(raw) > byte_limit:
+                                metadata["truncated"] = True
                                 raise _StreamFailure("failed", "control response byte budget exceeded")
                         return response.status_code, bytes(raw)
 
                 if not session_id or session_id == "auto":
                     session_id = binding.get("session_id", "")
                     if not session_id:
-                        created_code, created_body = await post_bounded(base + "/session", {}, context)
-                        if created_code not in {200, 201}:
-                            raise _StreamFailure("failed", "session creation rejected", created_code)
-                        try:
-                            session_id = json.loads(created_body)["id"]
-                        except (ValueError, KeyError, TypeError):
-                            raise _StreamFailure("failed", "session creation returned no id")
+                        if config.session_mode == "client_message_id":
+                            session_id = "ses_" + uuid.uuid4().hex
+                        else:
+                            created_code, created_body = await post_bounded(base + "/session", {}, context)
+                            if created_code not in {200, 201}:
+                                raise _StreamFailure("failed", "session creation rejected", created_code)
+                            try:
+                                session_id = json.loads(created_body)["id"]
+                            except (ValueError, KeyError, TypeError):
+                                raise _StreamFailure("failed", "session creation returned no id")
                         if not isinstance(session_id, str) or not session_id:
                             raise _StreamFailure("failed", "invalid session id")
+                if config.session_mode == "client_message_id":
+                    allocation_code, _ = await post_bounded(base + "/session/message/id", {}, {**context, "sessionID": session_id})
+                    if allocation_code not in {200, 201}:
+                        raise _StreamFailure("failed", "message id allocation rejected", allocation_code)
                 previous = set(binding.get("messages", [])) if binding.get("session_id") == session_id else set()
                 state.variables[key] = {"session_id": session_id, "messages": list(previous)}
                 metadata["session_id"] = session_id
@@ -153,10 +167,13 @@ class VesmartTransport(BaseTransport):
 
                 client.event_hooks["request"] = [guarded_request]
 
-                async def listen():
+                async def listen(prompt_body=None):
                     nonlocal size
                     stream_headers = {"Accept": "text/event-stream", "Accept-Encoding": "identity"}
-                    async with client.stream("GET", base + "/session/event", params={**context, "sessionID": session_id}, headers=stream_headers) as response:
+                    method = "POST" if prompt_body is not None else "GET"
+                    path = "/session/prompt" if prompt_body is not None else "/session/event"
+                    kwargs = {"json": prompt_body} if prompt_body is not None else {}
+                    async with client.stream(method, base + path, params={**context, "sessionID": session_id}, headers=stream_headers, **kwargs) as response:
                         if response.status_code != 200:
                             raise _StreamFailure("failed", "SSE connection rejected", response.status_code)
                         if "text/event-stream" not in response.headers.get("content-type", ""):
@@ -196,9 +213,18 @@ class VesmartTransport(BaseTransport):
                             props = event.get("properties", {})
                             if props.get("sessionID") not in {None, session_id}:
                                 return False
+                            # New completion aliases require explicit session context on the
+                            # subscription channel. A prompt response is request scoped.
+                            contextual = props.get("sessionID") == session_id or prompt_body is not None
                             if event.get("type") == "session.error":
-                                raise _StreamFailure("failed", "target session error")
-                            return bool(event.get("type") == "session.status" and props.get("status", {}).get("type") == "idle" and assembler.text)
+                                if config.session_mode == "server_create" or contextual:
+                                    raise _StreamFailure("failed", "target session error")
+                                return False
+                            legacy_idle = event.get("type") == "session.status" and props.get("status", {}).get("type") == "idle"
+                            terminal = legacy_idle or event.get("type") in {"session.idle", "turn-complete"}
+                            if config.session_mode == "client_message_id" or not legacy_idle:
+                                terminal = terminal and contextual
+                            return bool(terminal and assembler.text)
 
                         async for chunk in response.aiter_raw():
                             size += len(chunk)
@@ -212,17 +238,29 @@ class VesmartTransport(BaseTransport):
                                     return
                         raise _StreamFailure("failed", "SSE ended without matching completion")
 
-                listener = asyncio.create_task(listen())
-                ready_wait = asyncio.create_task(ready.wait())
-                tasks.extend([listener, ready_wait])
-                done, _ = await asyncio.wait([listener, ready_wait], return_when=asyncio.FIRST_COMPLETED)
-                if listener in done:
-                    await listener
-                await ready_wait
-                response_code, _ = await post_bounded(base + "/session/prompt", self._build_body(config, prompt), {**context, "sessionID": session_id})
-                if response_code not in {200, 202, 204}:
-                    raise _StreamFailure("failed", "prompt submission rejected", response_code)
-                await listener
+                body = self._build_body(config, prompt)
+                if config.response_channel == "prompt_sse":
+                    await listen(body)
+                else:
+                    listener = asyncio.create_task(listen())
+                    ready_wait = asyncio.create_task(ready.wait())
+                    tasks.extend([listener, ready_wait])
+                    done, _ = await asyncio.wait([listener, ready_wait], return_when=asyncio.FIRST_COMPLETED)
+                    if listener in done:
+                        await listener
+                    await ready_wait
+                    # The POST may itself be streamed; drain it independently of the
+                    # authoritative session events with a separate bounded byte budget.
+                    submission = asyncio.create_task(post_bounded(base + "/session/prompt", body,
+                        {**context, "sessionID": session_id}, config.max_event_bytes))
+                    tasks.append(submission)
+                    pending = {submission, listener}
+                    while pending:
+                        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                        for completed in done:
+                            value = await completed
+                            if completed is submission and value[0] not in {200, 202, 204}:
+                                raise _StreamFailure("failed", "prompt submission rejected", value[0])
                 previous.update(assembler.roles)
                 if assembler.message_id:
                     previous.add(assembler.message_id)
@@ -255,7 +293,10 @@ class VesmartTransport(BaseTransport):
         return TransportResponse(assembler.text if assembler else "", events, code, error, status, metadata)
 
     def _build_body(self, config: EndpointConfig, prompt: str) -> dict:
-        body = copy.deepcopy(config.json_template) if config.json_template else {"role": "user", "parts": [{"type": "text", "text": ""}]}
+        body = copy.deepcopy(config.json_template) if config.json_template else {
+            **({"role": "user"} if config.session_mode == "server_create" else {}),
+            "parts": [{"type": "text", "text": ""}],
+        }
         if config.generate_message_ids:
             body["messageID"] = "msg_" + uuid.uuid4().hex
             for part in body.get("parts", []):

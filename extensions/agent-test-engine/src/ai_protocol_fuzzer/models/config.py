@@ -34,6 +34,8 @@ class EndpointConfig:
     query_params: Dict[str, str] = field(default_factory=dict, repr=False)
     generate_message_ids: bool = False
     timestamp_header: bool = False
+    session_mode: str = "server_create"
+    response_channel: str = "session_event"
     max_event_bytes: int = 4 * 1024 * 1024
     max_events: int = 10000
     request_hook: Any = field(default=None, repr=False)

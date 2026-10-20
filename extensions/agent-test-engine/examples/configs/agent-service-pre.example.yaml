@@ -22,6 +22,9 @@ targets:
       appid: wb_vegax
       device-type: Web
       platform: web
+      os: web
+      hl: en
+      content-type: application/json
       origin: https://pre-ui.example.test
       referer: https://pre-ui.example.test/
       tz: Asia/Hong_Kong
@@ -29,9 +32,13 @@ targets:
     query_params: {appID: work}
     # query_params_env: {workspaceID: WESMART_PRE_WORKSPACE_ID}
     model_selection: {modelID: fixture-model, providerID: fixture-provider}
-    generate_message_ids: true
+    session_mode: client_message_id
+    response_channel: session_event
+    generate_message_ids: false
     timestamp_header: true
-    # Creation /session and SSE /session/event are provisional, pending captured examples.
+    # Client generates ses_ ID; POST /session/message/id before each prompt.
+    # response_channel: prompt_sse parses the POST stream directly instead of subscribing.
+    # Exact text/completion event bodies and allocation response still need review.
     budget:
       requests_per_second: 1
       request_timeout_seconds: 60

@@ -54,7 +54,13 @@ PRE 另需 `environment: pre`、`allow_remote: true`、HTTPS 和精确 allowed_o
 
 `headers_env` 支持 `access_token`、`did` 等认证/身份头；静态 `headers` 只接受已列出的业务头，拒绝内联凭据、Host 和任意转发头。`model_selection` 配置 modelID/providerID，`generate_message_ids` 每轮生成新 messageID/part ID；`timestamp_header` 在每个请求发送时生成毫秒 t_time。不要复用抓包时间戳、消息 ID 或 part ID。
 
-用户提供的 curl 只确认了消息提交结构。当前 `/session` 创建（空 JSON、响应 id）及 `/session/event` SSE（sessionID 查询、既有事件结构）仍是待核对的协议假设；尚未收到这两类脱敏样例。合成检查通过不代表 PRE 接入成功，保持 enabled=false 和 protocol_reviewed=false，待核对后再启用。
+后续脱敏材料说明 PRE 使用客户端 `ses_` 会话标识和 `/session/message/id` 分配步骤。设置 `session_mode: client_message_id` 后，引擎按身份、工作空间和运行生成新会话，先 POST `/session/message/id`（空 JSON），再发送 prompt；每个后续 turn 同样分配一次。不会调用旧 `/session` 创建接口，不允许复用 URL 中捕获的 sessionID。`server_create` 保留供旧协议与合成演示使用。
+
+分配接口响应结构尚未提供；当前只检查状态及体积，不猜测其中的消息 ID。最简提交只含 parts；`generate_message_ids: false` 不向其中添加客户端 messageID/part ID。可选 model 配置仍保留，确认可省略时可删去 model_selection。
+
+`response_channel: session_event` 从带 workspaceID/sessionID/appID 的 `/session/event` 收集回复，同时有界排空 prompt 响应。`response_channel: prompt_sse` 直接解析 prompt 的 text/event-stream，不再订阅另一条流。两种模式不合并重复事件、不自动回退或重发 prompt，均须有有效文本和匹配结束事件；新别名支持 session.idle / turn-complete。client_message_id 模式下订阅流结束事件必须带匹配 sessionID，直接 prompt 流允许请求本身提供关联。连接、心跳和快照不是完成证明。
+
+当前正文解析仍支持 message.updated / message.part.updated / message.part.delta 结构。用户提供的是 App 流连接/心跳样例，尚无实际回复正文、完整结束事件及分配响应样例；其他格式会明确失败或超时，不会算成功。平台本轮未请求 PRE，保持 enabled=false 和 protocol_reviewed=false。不订阅 App 全局流，不执行 PATCH 或账号间权限测试。
 
 ## API 与状态
 

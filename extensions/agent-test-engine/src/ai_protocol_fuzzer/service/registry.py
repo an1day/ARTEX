@@ -65,19 +65,24 @@ class RegisteredTarget:
     model_selection: dict[str, str] = field(default_factory=dict)
     generate_message_ids: bool = False
     timestamp_header: bool = False
+    session_mode: str = "server_create"
+    response_channel: str = "session_event"
 
     def endpoint(self) -> EndpointConfig:
         return EndpointConfig(name=self.target_id, url=self.base_url + "/session/prompt", headers=dict(self.headers),
                               timeout=self.request_timeout, transport_kind="wesmart_dual_sse", identity_ref=self.identity_ref,
                               query_params=dict(self.query_params), generate_message_ids=self.generate_message_ids,
                               timestamp_header=self.timestamp_header,
-                              json_template={"model": dict(self.model_selection), "parts": [{"type": "text", "text": ""}]} if self.model_selection else {},
+                              session_mode=self.session_mode, response_channel=self.response_channel,
+                              json_template=({**({"model": dict(self.model_selection)} if self.model_selection else {}), "parts": [{"type": "text", "text": ""}]}
+                                             if self.model_selection or self.session_mode == "client_message_id" else {}),
                               max_event_bytes=1024 * 1024)
 
     def public(self) -> dict:
         return {"target_id": self.target_id, "enabled": self.enabled, "scope_revision": self.scope_revision,
                 "identity_ref": self.identity_ref, "source_commit": self.source_commit, "simulation": self.simulation,
                 "transport": "wesmart_dual_sse", "allowed_cases": list(self.allowed_cases), "environment": self.environment,
+                "session_mode": self.session_mode, "response_channel": self.response_channel,
                 "observability": "target_client_event", "abort_capability": "unsupported"}
 
 
@@ -105,12 +110,14 @@ def load_registry(path: str | Path) -> dict[str, RegisteredTarget]:
         if not cases or any(case not in CASES for case in cases):
             raise ValueError("unknown or missing allowed_cases")
         headers = {}
-        static_names = {"app", "app-group", "appid", "device-type", "hl", "origin", "referer", "os", "platform", "tz", "ver", "user-agent"}
+        static_names = {"app", "app-group", "appid", "device-type", "hl", "origin", "referer", "os", "platform", "tz", "ver", "user-agent", "content-type"}
         for name, value in item.get("headers", {}).items():
             if not isinstance(name, str) or name.lower() not in static_names:
                 raise ValueError("unsupported static target header; credentials require headers_env")
             if not isinstance(value, str) or not value or len(value) > 4096 or "\n" in value or "\r" in value:
                 raise ValueError("invalid static target header")
+            if name.lower() == "content-type" and value != "application/json":
+                raise ValueError("target requests require application/json")
             if name.lower() in {key.lower() for key in headers}:
                 raise ValueError("duplicate target header")
             headers[name] = value
@@ -140,6 +147,15 @@ def load_registry(path: str | Path) -> dict[str, RegisteredTarget]:
         for flag in ("generate_message_ids", "timestamp_header"):
             if not isinstance(item.get(flag, False), bool):
                 raise ValueError("protocol flags must be boolean")
+        session_mode = item.get("session_mode", "server_create")
+        response_channel = item.get("response_channel", "session_event")
+        if session_mode not in {"server_create", "client_message_id"}:
+            raise ValueError("unsupported session_mode")
+        if response_channel not in {"session_event", "prompt_sse"}:
+            raise ValueError("unsupported response_channel")
+        if remote and item.get("enabled") is True and session_mode == "client_message_id":
+            if not {"access_token", "did"}.issubset({key.lower() for key in headers}) or not {"workspaceID", "appID"}.issubset(query):
+                raise ValueError("PRE client sessions require access_token, did, workspaceID and appID")
         canary = os.environ.get(item.get("canary_env", ""), "")
         if canary and (len(canary) < 20 or len(set(canary)) < 8):
             raise ValueError("test canary must be a unique random marker of at least 20 characters")
@@ -162,5 +178,5 @@ def load_registry(path: str | Path) -> dict[str, RegisteredTarget]:
         result[target_id] = RegisteredTarget(target_id, base, item["scope_revision"], item["identity_ref"],
             item.get("enabled") is True, cases, str(item.get("source_commit", "unknown")),
             item.get("simulation") is True, headers, canary, case_timeout, timeout, rps, environment, remote, cidrs,
-            query, dict(model), item.get("generate_message_ids", False), item.get("timestamp_header", False))
+            query, dict(model), item.get("generate_message_ids", False), item.get("timestamp_header", False), session_mode, response_channel)
     return result
