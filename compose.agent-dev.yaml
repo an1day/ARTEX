@@ -1,0 +1,21 @@
+# PostgreSQL in Docker; Go, Next.js and the loopback-only sidecar run on the host.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: artex
+      POSTGRES_DB: artex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.agent-dev.local}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - agent_dev_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U artex -d artex"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  agent_dev_pgdata:
