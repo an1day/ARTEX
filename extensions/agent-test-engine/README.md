@@ -62,7 +62,7 @@ PRE 另需 `environment: pre`、`allow_remote: true`、HTTPS 和精确 allowed_o
 
 正文解析支持 message.updated / message.part.updated / message.part.delta 结构。增量按 messageID/partID 拼接，同一 part 的终态 text 覆盖增量；message.updated 完成更新未重复 role 时保留先前身份。服务端分配的用户消息 ID 记为 request_message_id，并从输出中排除；助手回复的不同 ID 独立记为 message_id，不要求二者相等。结束类型另记 completion_event。
 
-用户已提供分配响应、完整 delta 和 session.idle 样例，终态 part 示例仍含省略号，不补造其中字段。正文所属关系或角色证据不足时仍不提升为 confirmed。当前协议变更尚未回归或实连验证，保持 enabled=false 和 protocol_reviewed=false。不订阅 App 全局流，不执行 PATCH 或账号间权限测试。
+用户已提供分配响应、完整 delta 和 session.idle 样例，终态 part 示例仍含省略号，不补造其中字段。正文所属关系或角色证据不足时仍不提升为 confirmed。当前 session_event 协议已有合成回归通过，尚未实连 PRE 验证，保持 enabled=false 和 protocol_reviewed=false。不订阅 App 全局流，不执行 PATCH 或账号间权限测试。
 
 ## API 与状态
 
