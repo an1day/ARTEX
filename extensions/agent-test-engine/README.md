@@ -56,11 +56,13 @@ PRE 另需 `environment: pre`、`allow_remote: true`、HTTPS 和精确 allowed_o
 
 后续脱敏材料说明 PRE 使用客户端 `ses_` 会话标识和 `/session/message/id` 分配步骤。设置 `session_mode: client_message_id` 后，引擎按身份、工作空间和运行生成新会话，先 POST `/session/message/id`（空 JSON），再发送 prompt；每个后续 turn 同样分配一次。不会调用旧 `/session` 创建接口，不允许复用 URL 中捕获的 sessionID。`server_create` 保留供旧协议与合成演示使用。
 
-分配接口响应结构尚未提供；当前只检查状态及体积，不猜测其中的消息 ID。最简提交只含 parts；`generate_message_ids: false` 不向其中添加客户端 messageID/part ID。可选 model 配置仍保留，确认可省略时可删去 model_selection。
+分配接口返回 `{"messageID":"msg_..."}`。引擎校验响应状态、JSON、ID 格式和本会话内重复值，再将服务端 ID 放入本轮 prompt 的 messageID；无有效 ID 时停止，不自动生成替代 ID 或重发。`generate_message_ids: false` 在该模式下只表示不生成额外 part ID，模板内旧 part ID 也会移除；用户消息 ID 始终来自分配接口。可选 model 配置仍保留，确认可省略时可删去 model_selection。
 
-`response_channel: session_event` 从带 workspaceID/sessionID/appID 的 `/session/event` 收集回复，同时有界排空 prompt 响应。`response_channel: prompt_sse` 直接解析 prompt 的 text/event-stream，不再订阅另一条流。两种模式不合并重复事件、不自动回退或重发 prompt，均须有有效文本和匹配结束事件；新别名支持 session.idle / turn-complete。client_message_id 模式下订阅流结束事件必须带匹配 sessionID，直接 prompt 流允许请求本身提供关联。连接、心跳和快照不是完成证明。
+最新用户材料明确回复来自 `/session/event`，PRE 使用 `response_channel: session_event`，同时有界排空 prompt 响应。另一协议可选 `response_channel: prompt_sse` 直接解析 prompt 的 text/event-stream，不再订阅另一条流；这不是当前 PRE 已观测到的正文来源。两种模式不合并重复事件、不自动回退或重发 prompt，均须有有效文本和匹配结束事件。client_message_id 模式等待 session.idle / turn-complete，前置 session.status:idle 不结束采集；订阅流结束事件必须带匹配 sessionID。连接、心跳和快照不是完成证明。
 
-当前正文解析仍支持 message.updated / message.part.updated / message.part.delta 结构。用户提供的是 App 流连接/心跳样例，尚无实际回复正文、完整结束事件及分配响应样例；其他格式会明确失败或超时，不会算成功。平台本轮未请求 PRE，保持 enabled=false 和 protocol_reviewed=false。不订阅 App 全局流，不执行 PATCH 或账号间权限测试。
+正文解析支持 message.updated / message.part.updated / message.part.delta 结构。增量按 messageID/partID 拼接，同一 part 的终态 text 覆盖增量；message.updated 完成更新未重复 role 时保留先前身份。服务端分配的用户消息 ID 记为 request_message_id，并从输出中排除；助手回复的不同 ID 独立记为 message_id，不要求二者相等。结束类型另记 completion_event。
+
+用户已提供分配响应、完整 delta 和 session.idle 样例，终态 part 示例仍含省略号，不补造其中字段。正文所属关系或角色证据不足时仍不提升为 confirmed。当前协议变更尚未回归或实连验证，保持 enabled=false 和 protocol_reviewed=false。不订阅 App 全局流，不执行 PATCH 或账号间权限测试。
 
 ## API 与状态
 

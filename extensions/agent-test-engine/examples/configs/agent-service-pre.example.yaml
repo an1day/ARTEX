@@ -38,7 +38,8 @@ targets:
     timestamp_header: true
     # Client generates ses_ ID; POST /session/message/id before each prompt.
     # response_channel: prompt_sse parses the POST stream directly instead of subscribing.
-    # Exact text/completion event bodies and allocation response still need review.
+    # Server-allocated messageID is used for the user prompt; replies have their own ID.
+    # session_event is the user-reported PRE reply source. Live verification is pending.
     budget:
       requests_per_second: 1
       request_timeout_seconds: 60

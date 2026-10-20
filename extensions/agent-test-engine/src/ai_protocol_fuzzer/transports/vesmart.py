@@ -6,6 +6,7 @@ import copy
 import codecs
 import hashlib
 import json
+import re
 import time
 import uuid
 from urllib.parse import parse_qs, urlsplit, urlunsplit
@@ -47,7 +48,10 @@ class MessageAssembler:
             return
         kind = event.get("type")
         if kind == "message.updated":
-            self.roles[info.get("id", "")] = info.get("role", "")
+            mid = info.get("id", "")
+            # Completion updates can omit role; preserve a prior assistant identity.
+            if mid and info.get("role"):
+                self.roles[mid] = info["role"]
             self.correlated = self.roles.get(self.message_id) == "assistant"
             return
         mid = part.get("messageID") or props.get("messageID") or "unattributed"
@@ -146,11 +150,25 @@ class VesmartTransport(BaseTransport):
                                 raise _StreamFailure("failed", "session creation returned no id")
                         if not isinstance(session_id, str) or not session_id:
                             raise _StreamFailure("failed", "invalid session id")
+                previous = set(binding.get("messages", [])) if binding.get("session_id") == session_id else set()
+                request_message_id = ""
                 if config.session_mode == "client_message_id":
-                    allocation_code, _ = await post_bounded(base + "/session/message/id", {}, {**context, "sessionID": session_id})
+                    allocation_code, allocation_body = await post_bounded(base + "/session/message/id", {}, {**context, "sessionID": session_id})
                     if allocation_code not in {200, 201}:
                         raise _StreamFailure("failed", "message id allocation rejected", allocation_code)
-                previous = set(binding.get("messages", [])) if binding.get("session_id") == session_id else set()
+                    try:
+                        allocation = json.loads(allocation_body)
+                    except ValueError:
+                        raise _StreamFailure("failed", "message id allocation returned invalid JSON") from None
+                    request_message_id = allocation.get("messageID") if isinstance(allocation, dict) else None
+                    if not isinstance(request_message_id, str) or not re.fullmatch(r"msg_[A-Za-z0-9_-]{1,200}", request_message_id):
+                        raise _StreamFailure("failed", "message id allocation returned invalid messageID")
+                    if request_message_id in previous:
+                        raise _StreamFailure("failed", "message id allocation reused a previous messageID")
+                    # Allocated IDs describe the submitted user message, not its
+                    # assistant reply. Exclude even echoes with no role declaration.
+                    previous.add(request_message_id)
+                    metadata["request_message_id"] = request_message_id
                 state.variables[key] = {"session_id": session_id, "messages": list(previous)}
                 metadata["session_id"] = session_id
                 assembler = MessageAssembler(session_id, previous)
@@ -221,10 +239,13 @@ class VesmartTransport(BaseTransport):
                                     raise _StreamFailure("failed", "target session error")
                                 return False
                             legacy_idle = event.get("type") == "session.status" and props.get("status", {}).get("type") == "idle"
-                            terminal = legacy_idle or event.get("type") in {"session.idle", "turn-complete"}
+                            terminal = (legacy_idle and config.session_mode == "server_create") or event.get("type") in {"session.idle", "turn-complete"}
                             if config.session_mode == "client_message_id" or not legacy_idle:
                                 terminal = terminal and contextual
-                            return bool(terminal and assembler.text)
+                            if terminal and assembler.text:
+                                metadata["completion_event"] = event["type"]
+                                return True
+                            return False
 
                         async for chunk in response.aiter_raw():
                             size += len(chunk)
@@ -238,7 +259,7 @@ class VesmartTransport(BaseTransport):
                                     return
                         raise _StreamFailure("failed", "SSE ended without matching completion")
 
-                body = self._build_body(config, prompt)
+                body = self._build_body(config, prompt, request_message_id)
                 if config.response_channel == "prompt_sse":
                     await listen(body)
                 else:
@@ -292,12 +313,24 @@ class VesmartTransport(BaseTransport):
                 await asyncio.gather(*tasks, return_exceptions=True)
         return TransportResponse(assembler.text if assembler else "", events, code, error, status, metadata)
 
-    def _build_body(self, config: EndpointConfig, prompt: str) -> dict:
+    def _build_body(self, config: EndpointConfig, prompt: str, request_message_id: str = "") -> dict:
         body = copy.deepcopy(config.json_template) if config.json_template else {
             **({"role": "user"} if config.session_mode == "server_create" else {}),
             "parts": [{"type": "text", "text": ""}],
         }
-        if config.generate_message_ids:
+        if config.session_mode == "client_message_id":
+            if not request_message_id:
+                raise ValueError("client session requires an allocated messageID")
+            body["messageID"] = request_message_id
+            # Captured part IDs must never survive template reuse. A part ID is
+            # optional in the documented minimal body; generate only when selected.
+            for part in body.get("parts", []):
+                if isinstance(part, dict):
+                    if config.generate_message_ids:
+                        part["id"] = "prt_" + uuid.uuid4().hex
+                    else:
+                        part.pop("id", None)
+        elif config.generate_message_ids:
             body["messageID"] = "msg_" + uuid.uuid4().hex
             for part in body.get("parts", []):
                 if isinstance(part, dict):
