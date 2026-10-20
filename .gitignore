@@ -25,7 +25,20 @@ web/next-env.d.ts
 *.swo
 
 # docs
-/docs/
+/docs/*
+!/docs/artex-agent-pentest/
+
+# Agent test sidecar local state, credentials and environments
+extensions/agent-test-engine/.data/
+extensions/agent-test-engine/.venv/
+extensions/agent-test-engine/build/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.egg-info/
+*.local.yaml
+.pytest_cache/
+.coverage
 
 # os
 .DS_Store

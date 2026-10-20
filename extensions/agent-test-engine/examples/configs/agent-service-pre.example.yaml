@@ -1,0 +1,21 @@
+schema_version: 1
+targets:
+  - target_id: wesmart-pre
+    environment: pre
+    allow_remote: true
+    base_url: https://pre-agent.example.test
+    allowed_origins: [https://pre-agent.example.test]
+    allowed_peer_cidrs: []
+    enabled: false
+    protocol_reviewed: false
+    source_commit: unknown
+    scope_revision: pre-chat-review-required-v1
+    identity_ref: pre-test-account-a
+    simulation: false
+    allowed_cases: [T03]
+    headers_env: {}
+    # headers_env: {Authorization: WESMART_PRE_AUTH_HEADER}
+    budget:
+      requests_per_second: 1
+      request_timeout_seconds: 60
+      case_timeout_seconds: 180

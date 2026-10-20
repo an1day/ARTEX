@@ -1,0 +1,19 @@
+# Operational service registry v1; no live target is enabled by default.
+schema_version: 1
+targets:
+  - target_id: wesmart-local
+    base_url: http://127.0.0.1:8999
+    allowed_origins: [http://127.0.0.1:8999]
+    scope_revision: local-review-required-v1
+    identity_ref: local-test-account-a
+    enabled: false
+    simulation: false
+    source_commit: unknown
+    allowed_cases: [T03, T08, T09]
+    headers_env: {}
+    # headers_env: {Authorization: WESMART_AUTH_HEADER}
+    # canary_env: WESMART_TARGET_CANARY
+    budget:
+      requests_per_second: 1
+      request_timeout_seconds: 60
+      case_timeout_seconds: 180
