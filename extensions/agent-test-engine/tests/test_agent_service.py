@@ -165,6 +165,43 @@ def test_pre_registry_requires_https_and_exact_origin(tmp_path):
         load_registry(path)
 
 
+def test_gateway_registry_env_credentials_and_protocol_options(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIXTURE_TOKEN", "fixture-credential-only")
+    monkeypatch.setenv("FIXTURE_DEVICE", "fixture-device-only")
+    monkeypatch.setenv("FIXTURE_WORKSPACE", "fixture-workspace-only")
+    path = tmp_path / "registry.yaml"
+    item = {"target_id": "gateway", "base_url": "http://127.0.0.1:9000/api/bullgpt-vega",
+        "allowed_origins": ["http://127.0.0.1:9000"], "scope_revision": "v1", "identity_ref": "A",
+        "allowed_cases": ["T03"], "enabled": False,
+        "headers": {"app": "global", "origin": "https://ui.example.test"},
+        "headers_env": {"access_token": "FIXTURE_TOKEN", "did": "FIXTURE_DEVICE"},
+        "query_params": {"appID": "work"}, "query_params_env": {"workspaceID": "FIXTURE_WORKSPACE"},
+        "model_selection": {"modelID": "fixture-model", "providerID": "fixture"},
+        "generate_message_ids": True, "timestamp_header": True}
+    path.write_text(json.dumps({"schema_version": 1, "targets": [item]}))
+    registered = load_registry(path)["gateway"]
+    config = registered.endpoint()
+    assert config.query_params == {"appID": "work", "workspaceID": "fixture-workspace-only"}
+    assert config.headers["access_token"] == "fixture-credential-only"
+    assert config.generate_message_ids and config.timestamp_header
+    assert config.json_template["model"]["modelID"] == "fixture-model"
+    assert "fixture-credential-only" not in repr(registered)
+    assert "fixture-workspace-only" not in json.dumps(registered.public())
+    item["headers"]["access_token"] = "inline-secret-forbidden"
+    path.write_text(json.dumps({"schema_version": 1, "targets": [item]}))
+    with pytest.raises(ValueError, match="headers_env"):
+        load_registry(path)
+
+
+def test_gateway_sensitive_fields_are_redacted(tmp_path):
+    store = LocalStore(tmp_path)
+    try:
+        fields = {key: "fixture-value" for key in ["access_token", "refresh_token", "did", "workspaceID"]}
+        assert set(store.redact(fields).values()) == {"[REDACTED]"}
+    finally:
+        store.close()
+
+
 def test_positive_canary_requires_correlated_repeated_observation():
     base = {"healthy": True, "target_owned_marker": True, "input_contains_canary": False, "association": "assistant_message"}
     observations = [{**base, "session_id": "baseline", "canary_present": False},

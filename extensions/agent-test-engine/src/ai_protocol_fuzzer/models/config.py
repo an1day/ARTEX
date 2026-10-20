@@ -31,6 +31,9 @@ class EndpointConfig:
     model: str = ""
     transport_kind: str = "auto"
     identity_ref: str = ""
+    query_params: Dict[str, str] = field(default_factory=dict, repr=False)
+    generate_message_ids: bool = False
+    timestamp_header: bool = False
     max_event_bytes: int = 4 * 1024 * 1024
     max_events: int = 10000
     request_hook: Any = field(default=None, repr=False)

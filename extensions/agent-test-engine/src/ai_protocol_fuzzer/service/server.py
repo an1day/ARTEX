@@ -104,8 +104,11 @@ def main():
     registry = load_registry(args.registry)
     secrets = [token]
     for target in registry.values():
-        secrets.extend(target.headers.values())
-        secrets.extend(value.split(" ", 1)[-1] for value in target.headers.values())
+        credential_values = [value for key, value in target.headers.items()
+                             if key.lower() in {"authorization", "cookie", "x-test-identity", "x-api-key", "access_token", "did"}]
+        secrets.extend(credential_values)
+        secrets.extend(value for key, value in target.query_params.items() if key == "workspaceID")
+        secrets.extend(value.split(" ", 1)[-1] for value in credential_values)
         if target.canary:
             secrets.append(target.canary)
     store = LocalStore(args.data_dir, tuple(secrets))

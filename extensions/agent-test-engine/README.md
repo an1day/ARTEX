@@ -48,6 +48,14 @@ PRE 另需 `environment: pre`、`allow_remote: true`、HTTPS 和精确 allowed_o
 
 首轮 PRE 只登记 T03。T08 需目标预置随机 canary，且有可比基线和独立新会话复核；T09 需要可信工具执行日志适配，当前固定 blocked。
 
+### PRE 消息接口适配
+
+`base_url` 包含业务前缀（例如 `/api/bullgpt-vega`），引擎在其后拼接 `/session/prompt`。`query_params` 允许 `appID`/`workspaceID`，敏感工作空间标识可经 `query_params_env` 引用环境变量。上下文参数贯穿创建、订阅、提交，并参与会话隔离键；不在注册文件中复用抓包中的 sessionID。
+
+`headers_env` 支持 `access_token`、`did` 等认证/身份头；静态 `headers` 只接受已列出的业务头，拒绝内联凭据、Host 和任意转发头。`model_selection` 配置 modelID/providerID，`generate_message_ids` 每轮生成新 messageID/part ID；`timestamp_header` 在每个请求发送时生成毫秒 t_time。不要复用抓包时间戳、消息 ID 或 part ID。
+
+用户提供的 curl 只确认了消息提交结构。当前 `/session` 创建（空 JSON、响应 id）及 `/session/event` SSE（sessionID 查询、既有事件结构）仍是待核对的协议假设；尚未收到这两类脱敏样例。合成检查通过不代表 PRE 接入成功，保持 enabled=false 和 protocol_reviewed=false，待核对后再启用。
+
 ## API 与状态
 
 MCP `/mcp` 支持 list_target_capabilities、list_test_cases、start_test_run、get_test_run、cancel_test_run、get_evidence_manifest、get_evidence_preview、verify_candidate。ARTEX `/api/agent-security/tools/{tool}` 只转发该固定集合，受现有 JWT 保护。

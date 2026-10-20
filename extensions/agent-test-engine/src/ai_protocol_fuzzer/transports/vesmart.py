@@ -6,6 +6,8 @@ import copy
 import codecs
 import hashlib
 import json
+import time
+import uuid
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import httpx
@@ -91,14 +93,27 @@ class VesmartTransport(BaseTransport):
             base = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.split("/session/prompt")[0].rstrip("/"), "", ""))
             if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.fragment:
                 raise _StreamFailure("failed", "invalid endpoint")
-            material = json.dumps([base, config.identity_ref, sorted(config.headers.items())], ensure_ascii=True)
+            parsed_params = parse_qs(parsed.query, keep_blank_values=True)
+            if any(len(values) != 1 for values in parsed_params.values()):
+                raise _StreamFailure("failed", "duplicate endpoint query parameters")
+            context = {name: values[0] for name, values in parsed_params.items() if name != "sessionID"}
+            for name, value in config.query_params.items():
+                if name == "sessionID" or (name in context and context[name] != value):
+                    raise _StreamFailure("failed", "conflicting endpoint query parameters")
+                context[name] = value
+            material = json.dumps([base, config.identity_ref, sorted(config.headers.items()), sorted(context.items()), config.json_template], ensure_ascii=True, sort_keys=True)
             key = "wesmart:" + hashlib.sha256(material.encode()).hexdigest()
             binding = state.variables.get(key, {})
-            session_id = parse_qs(parsed.query).get("sessionID", [""])[0]
+            session_id = parsed_params.get("sessionID", [""])[0]
+            async def initial_request(request):
+                if config.timestamp_header:
+                    request.headers["t_time"] = str(time.time_ns() // 1_000_000)
+                if config.request_hook:
+                    await config.request_hook(request)
             async with httpx.AsyncClient(
                 headers=dict(config.headers), verify=config.verify_ssl, proxy=config.proxy or None,
                 trust_env=False, follow_redirects=False, timeout=float(config.timeout),
-                event_hooks={"request": [config.request_hook]} if config.request_hook else None,
+                event_hooks={"request": [initial_request]},
             ) as client:
                 async def post_bounded(path: str, body: dict, params=None):
                     raw = bytearray()
@@ -112,7 +127,7 @@ class VesmartTransport(BaseTransport):
                 if not session_id or session_id == "auto":
                     session_id = binding.get("session_id", "")
                     if not session_id:
-                        created_code, created_body = await post_bounded(base + "/session", {})
+                        created_code, created_body = await post_bounded(base + "/session", {}, context)
                         if created_code not in {200, 201}:
                             raise _StreamFailure("failed", "session creation rejected", created_code)
                         try:
@@ -129,11 +144,11 @@ class VesmartTransport(BaseTransport):
                 size = 0
 
                 async def guarded_request(request):
-                    if config.request_hook:
-                        await config.request_hook(request)
+                    is_prompt = request.method == "POST" and request.url.path.endswith("/session/prompt")
+                    await initial_request(request)
                     if state.cancel_event.is_set():
                         raise _StreamFailure("cancelled", "client cancelled before request submission")
-                    if request.method == "POST" and request.url.path.endswith("/session/prompt"):
+                    if is_prompt:
                         submitted.set()
 
                 client.event_hooks["request"] = [guarded_request]
@@ -141,7 +156,7 @@ class VesmartTransport(BaseTransport):
                 async def listen():
                     nonlocal size
                     stream_headers = {"Accept": "text/event-stream", "Accept-Encoding": "identity"}
-                    async with client.stream("GET", base + "/session/event", params={"sessionID": session_id}, headers=stream_headers) as response:
+                    async with client.stream("GET", base + "/session/event", params={**context, "sessionID": session_id}, headers=stream_headers) as response:
                         if response.status_code != 200:
                             raise _StreamFailure("failed", "SSE connection rejected", response.status_code)
                         if "text/event-stream" not in response.headers.get("content-type", ""):
@@ -204,7 +219,7 @@ class VesmartTransport(BaseTransport):
                 if listener in done:
                     await listener
                 await ready_wait
-                response_code, _ = await post_bounded(base + "/session/prompt", self._build_body(config, prompt), {"sessionID": session_id})
+                response_code, _ = await post_bounded(base + "/session/prompt", self._build_body(config, prompt), {**context, "sessionID": session_id})
                 if response_code not in {200, 202, 204}:
                     raise _StreamFailure("failed", "prompt submission rejected", response_code)
                 await listener
@@ -241,6 +256,11 @@ class VesmartTransport(BaseTransport):
 
     def _build_body(self, config: EndpointConfig, prompt: str) -> dict:
         body = copy.deepcopy(config.json_template) if config.json_template else {"role": "user", "parts": [{"type": "text", "text": ""}]}
+        if config.generate_message_ids:
+            body["messageID"] = "msg_" + uuid.uuid4().hex
+            for part in body.get("parts", []):
+                if isinstance(part, dict):
+                    part["id"] = "prt_" + uuid.uuid4().hex
         if isinstance(body.get("parts"), list):
             for part in body["parts"]:
                 if isinstance(part, dict) and part.get("type") == "text":

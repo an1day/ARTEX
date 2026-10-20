@@ -3,7 +3,7 @@ targets:
   - target_id: wesmart-pre
     environment: pre
     allow_remote: true
-    base_url: https://pre-agent.example.test
+    base_url: https://pre-agent.example.test/api/bullgpt-vega
     allowed_origins: [https://pre-agent.example.test]
     allowed_peer_cidrs: []
     enabled: false
@@ -14,7 +14,24 @@ targets:
     simulation: false
     allowed_cases: [T03]
     headers_env: {}
-    # headers_env: {Authorization: WESMART_PRE_AUTH_HEADER}
+    # Resolve locally; never paste captured credentials or existing session IDs here.
+    # headers_env: {access_token: WESMART_PRE_ACCESS_TOKEN, did: WESMART_PRE_DEVICE_ID}
+    headers:
+      app: global
+      app-group: broker
+      appid: wb_vegax
+      device-type: Web
+      platform: web
+      origin: https://pre-ui.example.test
+      referer: https://pre-ui.example.test/
+      tz: Asia/Hong_Kong
+      ver: 1.0.0
+    query_params: {appID: work}
+    # query_params_env: {workspaceID: WESMART_PRE_WORKSPACE_ID}
+    model_selection: {modelID: fixture-model, providerID: fixture-provider}
+    generate_message_ids: true
+    timestamp_header: true
+    # Creation /session and SSE /session/event are provisional, pending captured examples.
     budget:
       requests_per_second: 1
       request_timeout_seconds: 60

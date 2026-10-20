@@ -35,6 +35,12 @@ def wesmart_fixture():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             path = urlsplit(self.path)
+            server.requests.append(("POST", self.path, dict(self.headers)))
+            if server.prefix:
+                if not path.path.startswith(server.prefix):
+                    self.json_response(404, {})
+                    return
+                path = path._replace(path=path.path[len(server.prefix):])
             if path.path == "/session":
                 with server.lock:
                     sid = "ses" + str(len(server.sessions) + 1)
@@ -68,6 +74,7 @@ def wesmart_fixture():
             server.sessions[sid].put(None)
 
         def do_GET(self):
+            server.requests.append(("GET", self.path, dict(self.headers)))
             sid = parse_qs(urlsplit(self.path).query)["sessionID"][0]
             self.send_response(server.stream_status)
             self.send_header("Content-Type", "text/event-stream")
@@ -101,6 +108,7 @@ def wesmart_fixture():
 
     server = Server(("127.0.0.1", 0), Handler)
     server.sessions, server.prompts = {}, []
+    server.requests, server.prefix = [], ""
     server.lock, server.stopping = threading.Lock(), threading.Event()
     server.stream_status = server.prompt_status = 200
     server.hold = server.disconnect = False
@@ -196,3 +204,45 @@ def test_pre_submission_replay_cannot_finish_new_turn(wesmart_fixture):
     response = VesmartTransport().send(config, "BASELINE")
     assert response.completion_status == "completed"
     assert response.text == "BASELINE_OK"
+
+
+def test_gateway_prefix_context_headers_model_and_fresh_ids(wesmart_fixture):
+    server = wesmart_fixture
+    server.prefix = "/api/bullgpt-vega"
+    config = EndpointConfig("fixture", server.base + server.prefix + "/session/prompt?appID=work",
+        query_params={"workspaceID": "fixture-workspace"}, headers={"access_token": "fixture-token", "did": "fixture-device"},
+        json_template={"model": {"modelID": "fixture-model", "providerID": "fixture-provider"},
+            "messageID": "captured-message", "parts": [{"id": "captured-part", "type": "text", "text": ""}]},
+        generate_message_ids=True, timestamp_header=True, timeout=2)
+    state = SessionState()
+    a = VesmartTransport().send(config, "BASELINE", state)
+    b = VesmartTransport().send(config, "SECOND", state)
+    assert a.completion_status == b.completion_status == "completed"
+    assert a.metadata["session_id"] == b.metadata["session_id"]
+    assert len(server.requests) == 5
+    for method, url, headers in server.requests:
+        parsed = urlsplit(url)
+        assert parsed.path.startswith(server.prefix + "/session")
+        assert parse_qs(parsed.query)["workspaceID"] == ["fixture-workspace"]
+        assert parse_qs(parsed.query)["appID"] == ["work"]
+        lowered = {key.lower(): value for key, value in headers.items()}
+        assert lowered["access_token"] == "fixture-token"
+        assert lowered["did"] == "fixture-device"
+        assert int(lowered["t_time"]) > 0
+    bodies = [body for _, body in server.prompts]
+    assert bodies[0]["model"] == config.json_template["model"]
+    assert len({body["messageID"] for body in bodies} | {"captured-message"}) == 3
+    assert len({body["parts"][0]["id"] for body in bodies} | {"captured-part"}) == 3
+    assert config.json_template["messageID"] == "captured-message"
+    config.query_params["workspaceID"] = "another-workspace"
+    c = VesmartTransport().send(config, "BASELINE", state)
+    assert c.completion_status == "completed"
+    assert c.metadata["session_id"] != a.metadata["session_id"]
+
+
+def test_conflicting_or_duplicate_query_rejected_before_network(wesmart_fixture):
+    for query in ["?workspaceID=a&workspaceID=b", "?workspaceID=a"]:
+        config = endpoint(wesmart_fixture, query_params={"workspaceID": "b"})
+        config.url += query
+        assert VesmartTransport().send(config, "BASELINE").completion_status == "failed"
+    assert not wesmart_fixture.requests

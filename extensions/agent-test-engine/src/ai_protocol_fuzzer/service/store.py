@@ -53,7 +53,7 @@ class LocalStore:
 
     def redact(self, value):
         if isinstance(value, dict):
-            return {k: "[REDACTED]" if str(k).lower() in {"authorization", "cookie", "set-cookie", "password", "api_key", "token", "secret"} else self.redact(v) for k, v in value.items()}
+            return {k: "[REDACTED]" if str(k).lower() in {"authorization", "cookie", "set-cookie", "password", "api_key", "token", "secret", "access_token", "refresh_token", "id_token", "did", "workspaceid"} else self.redact(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
             return [self.redact(v) for v in value]
         if isinstance(value, str):

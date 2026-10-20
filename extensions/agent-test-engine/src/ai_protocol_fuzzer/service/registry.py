@@ -61,10 +61,17 @@ class RegisteredTarget:
     environment: str = "local-isolated"
     allow_remote: bool = False
     allowed_peer_cidrs: tuple[str, ...] = ()
+    query_params: dict[str, str] = field(default_factory=dict, repr=False)
+    model_selection: dict[str, str] = field(default_factory=dict)
+    generate_message_ids: bool = False
+    timestamp_header: bool = False
 
     def endpoint(self) -> EndpointConfig:
         return EndpointConfig(name=self.target_id, url=self.base_url + "/session/prompt", headers=dict(self.headers),
                               timeout=self.request_timeout, transport_kind="wesmart_dual_sse", identity_ref=self.identity_ref,
+                              query_params=dict(self.query_params), generate_message_ids=self.generate_message_ids,
+                              timestamp_header=self.timestamp_header,
+                              json_template={"model": dict(self.model_selection), "parts": [{"type": "text", "text": ""}]} if self.model_selection else {},
                               max_event_bytes=1024 * 1024)
 
     def public(self) -> dict:
@@ -98,13 +105,41 @@ def load_registry(path: str | Path) -> dict[str, RegisteredTarget]:
         if not cases or any(case not in CASES for case in cases):
             raise ValueError("unknown or missing allowed_cases")
         headers = {}
+        static_names = {"app", "app-group", "appid", "device-type", "hl", "origin", "referer", "os", "platform", "tz", "ver", "user-agent"}
+        for name, value in item.get("headers", {}).items():
+            if not isinstance(name, str) or name.lower() not in static_names:
+                raise ValueError("unsupported static target header; credentials require headers_env")
+            if not isinstance(value, str) or not value or len(value) > 4096 or "\n" in value or "\r" in value:
+                raise ValueError("invalid static target header")
+            if name.lower() in {key.lower() for key in headers}:
+                raise ValueError("duplicate target header")
+            headers[name] = value
         for name, env_key in item.get("headers_env", {}).items():
-            if name.lower() not in {"authorization", "cookie", "x-test-identity", "x-api-key"}:
+            if name.lower() not in {"authorization", "cookie", "x-test-identity", "x-api-key", "access_token", "did"}:
                 raise ValueError("unsupported target credential header")
+            if name.lower() in {key.lower() for key in headers}:
+                raise ValueError("duplicate target header")
             value = os.environ.get(env_key, "")
             if not value or "\n" in value or "\r" in value:
                 raise ValueError("missing or invalid credential environment variable")
             headers[name] = value
+        query = {}
+        for mapping, from_env in [(item.get("query_params", {}), False), (item.get("query_params_env", {}), True)]:
+            for name, configured in mapping.items():
+                if name not in {"workspaceID", "appID"} or name in query:
+                    raise ValueError("unsupported or duplicate target query parameter")
+                value = os.environ.get(configured, "") if from_env else configured
+                if not isinstance(value, str) or not value or len(value) > 512 or any(ord(c) < 32 for c in value):
+                    raise ValueError("missing or invalid target query parameter")
+                query[name] = value
+        model = item.get("model_selection", {})
+        if not isinstance(model, dict) or (model and set(model) != {"modelID", "providerID"}):
+            raise ValueError("model_selection requires modelID and providerID")
+        if any(not isinstance(value, str) or not value or len(value) > 200 for value in model.values()):
+            raise ValueError("invalid model selection")
+        for flag in ("generate_message_ids", "timestamp_header"):
+            if not isinstance(item.get(flag, False), bool):
+                raise ValueError("protocol flags must be boolean")
         canary = os.environ.get(item.get("canary_env", ""), "")
         if canary and (len(canary) < 20 or len(set(canary)) < 8):
             raise ValueError("test canary must be a unique random marker of at least 20 characters")
@@ -126,5 +161,6 @@ def load_registry(path: str | Path) -> dict[str, RegisteredTarget]:
                 raise ValueError("unrestricted peer networks are not allowed")
         result[target_id] = RegisteredTarget(target_id, base, item["scope_revision"], item["identity_ref"],
             item.get("enabled") is True, cases, str(item.get("source_commit", "unknown")),
-            item.get("simulation") is True, headers, canary, case_timeout, timeout, rps, environment, remote, cidrs)
+            item.get("simulation") is True, headers, canary, case_timeout, timeout, rps, environment, remote, cidrs,
+            query, dict(model), item.get("generate_message_ids", False), item.get("timestamp_header", False))
     return result
